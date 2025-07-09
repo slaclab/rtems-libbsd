@@ -154,6 +154,8 @@ tsec_fdt_attach(device_t dev)
 	/* FIXME */
 	sc->phyaddr = -1;
 
+	sc->phy_regoff = TSEC_REG_MIIBASE;
+
 	/* Init timer */
 	callout_init(&sc->tsec_callout, 1);
 
