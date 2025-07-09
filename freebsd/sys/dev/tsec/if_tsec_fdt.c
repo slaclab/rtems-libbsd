@@ -354,6 +354,7 @@ tsec_fdt_detach(device_t dev)
 	return (0);
 }
 
+#ifndef __rtems__
 void
 tsec_get_hwaddr(struct tsec_softc *sc, uint8_t *addr)
 {
@@ -388,3 +389,4 @@ tsec_get_hwaddr(struct tsec_softc *sc, uint8_t *addr)
 	for (i = 0; i < 6; i++)
 		addr[5-i] = hw.addr[i];
 }
+#endif
