@@ -519,29 +519,29 @@ extern "C" {
  * NXP QorIQ Network Driver.
  */
 #if !defined(RTEMS_BSD_DRIVER_TSEC)
-  #define RTEMS_BSD_DRIVER_TSEC(_base, _tx_irq, _rx_irq, _er_irq)   \
-    static const rtems_bsd_device_resource tsec0_res[] = {          \
-      {                                                             \
-        .type = RTEMS_BSD_RES_MEMORY,                               \
-        .start_request = 0,                                         \
-        .start_actual = (_base)                                     \
-      }, {                                                          \
-        .type = RTEMS_BSD_RES_IRQ,                                  \
-        .start_request = 0,                                         \
-        .start_actual = (_tx_irq)                                   \
-      }, {                                                          \
-        .type = RTEMS_BSD_RES_IRQ,                                  \
-        .start_request = 1,                                         \
-        .start_actual = (_rx_irq)                                   \
-      }, {                                                          \
-        .type = RTEMS_BSD_RES_IRQ,                                  \
-        .start_request = 2,                                         \
-        .start_actual = (_er_irq)                                   \
-      }                                                             \
-    };                                                              \
-    RTEMS_BSD_DEFINE_NEXUS_DEVICE(tsec, 0,                          \
-                                  RTEMS_ARRAY_SIZE(tsec0_res),      \
-                                  &tsec0_res[0])
+  #define RTEMS_BSD_DRIVER_TSEC(_num, _base, _tx_irq, _rx_irq, _er_irq)   \
+    static const rtems_bsd_device_resource tsec ## _num ## _res[] = {     \
+      {                                                                   \
+        .type = RTEMS_BSD_RES_MEMORY,                                     \
+        .start_request = 0,                                               \
+        .start_actual = (_base)                                           \
+      }, {                                                                \
+        .type = RTEMS_BSD_RES_IRQ,                                        \
+        .start_request = 0,                                               \
+        .start_actual = (_tx_irq)                                         \
+      }, {                                                                \
+        .type = RTEMS_BSD_RES_IRQ,                                        \
+        .start_request = 1,                                               \
+        .start_actual = (_rx_irq)                                         \
+      }, {                                                                \
+        .type = RTEMS_BSD_RES_IRQ,                                        \
+        .start_request = 2,                                               \
+        .start_actual = (_er_irq)                                         \
+      }                                                                   \
+    };                                                                    \
+    RTEMS_BSD_DEFINE_NEXUS_DEVICE(tsec, _num,                             \
+                                  RTEMS_ARRAY_SIZE(tsec ## _num ## _res), \
+                                  &tsec ## _num ## _res[0])
 #endif /* RTEMS_BSD_DRIVER_TSEC */
 
 /*
