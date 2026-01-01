@@ -88,6 +88,7 @@
 #include <rtems/bsd/local/miibus_if.h>
 #include <stdio.h>
 #include <bsp/mv643xx_eth.h>
+#include <bsp.h>
 
 #define DRVNAME "mv63xx_nexus"
 
@@ -232,6 +233,11 @@ mve_probe(device_t dev)
 #endif
 
 	if ( BSP_mve_probe( unit ) < 0 ) {
+		err = ENXIO;
+	}
+
+	if (BSP_getBoardType() == MVME5500) {
+		printk(DRVNAME": mve_probe: Skipping incompatible MV642XX chip\n");
 		err = ENXIO;
 	}
 
