@@ -881,6 +881,25 @@ class if_mve(builder.Module):
             mm.generator['source']()
         )
 
+
+#
+# Legacy TSEC Ethernet driver
+#
+class if_tsec_legacy(builder.Module):
+
+    def __init__(self, manager):
+        super(if_tsec_legacy, self).__init__(manager, type(self).__name__)
+
+    def generate(self):
+        mm = self.manager
+        self.addCPUDependentRTEMSSourceFiles(
+            ['powerpc'],
+            [
+                'sys/dev/tsec/if_tsec_legacy.c',
+            ],
+            mm.generator['source']()
+        )
+
 #
 # USB
 #
@@ -5990,6 +6009,7 @@ def load(mm):
     mm.addModule(dev_input(mm))
     mm.addModule(evdev(mm))
     mm.addModule(if_mve(mm))
+    mm.addModule(if_tsec_legacy(mm))
 
     mm.addModule(dev_usb(mm))
     mm.addModule(dev_usb_controller(mm))
