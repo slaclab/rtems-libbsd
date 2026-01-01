@@ -64,7 +64,7 @@ static int		pcib_suspend(device_t dev);
 static int		pcib_resume(device_t dev);
 
 static bus_child_present_t	pcib_child_present;
-static bus_alloc_resource_t	pcib_alloc_resource;
+bus_alloc_resource_t	pcib_alloc_resource;
 #ifdef NEW_PCIB
 static bus_adjust_resource_t	pcib_adjust_resource;
 static bus_release_resource_t	pcib_release_resource;
@@ -2297,7 +2297,7 @@ updatewin:
  * We have to trap resource allocation requests and ensure that the bridge
  * is set up to, or capable of handling them.
  */
-static struct resource *
+struct resource *
 pcib_alloc_resource(device_t dev, device_t child, int type, int *rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
@@ -2593,7 +2593,7 @@ pcib_unmap_resource(device_t dev, device_t child, int type, struct resource *r,
  * We have to trap resource allocation requests and ensure that the bridge
  * is set up to, or capable of handling them.
  */
-static struct resource *
+struct resource *
 pcib_alloc_resource(device_t dev, device_t child, int type, int *rid,
     rman_res_t start, rman_res_t end, rman_res_t count, u_int flags)
 {
