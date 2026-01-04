@@ -86,6 +86,7 @@
 #include <dev/mii/mii.h>
 #include <dev/mii/miivar.h>
 #include <rtems/bsd/local/miibus_if.h>
+#include <rtems/rtems_mii_ioctl.h>
 #include <stdio.h>
 #include <bsp/mv643xx_eth.h>
 #include <bsp.h>
@@ -156,7 +157,6 @@
 /* Hacks -- FIXME */
 rtems_id
 rtems_bsdnet_newproc (char *name, int stacksize, void(*entry)(void *), void *arg);
-#define SIO_RTEMS_SHOW_STATS _IO('i', 250)
 
 #define	MVE643XX_DUMMY_PHY 0 /* phy is defined by low-level driver */
 
