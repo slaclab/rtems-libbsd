@@ -1,3 +1,5 @@
+#include <machine/rtems-bsd-kernel-space.h>
+
 /*
  * Authorship
  * ----------
@@ -44,10 +46,17 @@
  * ------------------ SLAC Software Notices, Set 4 OTT.002a, 2004 FEB 03
  */
 
+/*
+ * RTEMS libBSD port by Jeremy Lorelli <lorelli@slac.stanford.edu>, Jan. 2026
+ *
+ * Notable differences with rtems-net-legacy tsec driver:
+ *  - Support for watchdog timer removed
+ *  - Some public API differences with the legacy networking stack
+ */
+ 
 #include <bsp.h>
-#ifdef LIBBSP_POWERPC_MVME3100_BSP_H
 
-#include <machine/rtems-bsd-kernel-space.h>
+#ifdef LIBBSP_POWERPC_MVME3100_BSP_H
 
 #include <rtems.h>
 #include <rtems/error.h>
@@ -60,24 +69,27 @@
 #include <bsp.h>
 
 #include <rtems/rtems_bsdnet.h>
-#include <sys/param.h>
-#include <sys/mbuf.h>
+#include <sys/types.h>
+#include <sys/kernel.h>
+#include <sys/bus.h>
+#include <sys/module.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
-#include <net/ethernet.h>
+#include <sys/kobj.h>
 #include <net/if.h>
-#include <netinet/in.h>
-#include <netinet/if_ether.h>
 #include <net/if_types.h>
 #include <net/if_var.h>
 #include <net/if_dl.h>
 #include <net/if_media.h>
-#include <sys/bus.h>
-#include <rtems/rtems_mii_ioctl.h>
-#include <if.h>
+#include <net/ethernet.h>
 #include <dev/mii/mii.h>
 #include <dev/mii/miivar.h>
-#include <sys/module.h>
+
+#include <rtems/bsd/local/miibus_if.h>
+#include <rtems/bsd/local/device_if.h>
+#include <rtems/rtems_mii_ioctl.h>
+#include <rtems/bsd/local/miidevs.h>
 
 #include <bsp/if_tsec_pub.h>
 
@@ -121,6 +133,12 @@ phy_irq_pending(struct tsec_private *mp);
 
 static uint32_t
 phy_ack_irq(struct tsec_private *mp);
+
+static uint32_t
+phy_get_speed(struct tsec_private* mp);
+
+static void
+phy_set_media(struct tsec_private* mp, uint32_t media);
 
 static void
 tsec_update_mcast(struct ifnet *ifp);
@@ -726,10 +744,14 @@ struct tsec_bsdsupp {
 /* bsdnet driver data              */
 struct tsec_softc {
 	if_t				ifp;
-	//struct arpcom		arpcom;
 	struct tsec_bsdsupp	bsd;
 	struct tsec_private	pvt;
 	uint8_t enetaddr[ETHER_ADDR_LEN];
+	device_t dev;
+
+    device_t miibus;
+	struct mii_data* mii_softc;
+
 	int unit;
 	bool was_init;
 };
@@ -753,21 +775,21 @@ typedef struct tsec_bsp_config {
 static TsecBspConfig tsec_config[] =
 {
 	{
-		base:     BSP_8540_CCSR_BASE         + 0x24000,
-		xirq:     BSP_CORE_IRQ_LOWEST_OFFSET + 13,
-		rirq:     BSP_CORE_IRQ_LOWEST_OFFSET + 14,
-		eirq:     BSP_CORE_IRQ_LOWEST_OFFSET + 18,
-		phy_base: BSP_8540_CCSR_BASE         + 0x24000,
-		phy_addr: 1,
+		.base =     BSP_8540_CCSR_BASE         + 0x24000,
+		.xirq =     BSP_CORE_IRQ_LOWEST_OFFSET + 13,
+		.rirq =     BSP_CORE_IRQ_LOWEST_OFFSET + 14,
+		.eirq =     BSP_CORE_IRQ_LOWEST_OFFSET + 18,
+		.phy_base = BSP_8540_CCSR_BASE         + 0x24000,
+		.phy_addr = 1,
 	},
 	{
-		base:     BSP_8540_CCSR_BASE         + 0x25000,
-		xirq:     BSP_CORE_IRQ_LOWEST_OFFSET + 19,
-		rirq:     BSP_CORE_IRQ_LOWEST_OFFSET + 20,
-		eirq:     BSP_CORE_IRQ_LOWEST_OFFSET + 23,
+		.base =     BSP_8540_CCSR_BASE         + 0x25000,
+		.xirq =     BSP_CORE_IRQ_LOWEST_OFFSET + 19,
+		.rirq =     BSP_CORE_IRQ_LOWEST_OFFSET + 20,
+		.eirq =     BSP_CORE_IRQ_LOWEST_OFFSET + 23,
 		/* all PHYs are on the 1st adapter's mii bus */
-		phy_base: BSP_8540_CCSR_BASE         + 0x24000,
-		phy_addr: 2,
+		.phy_base = BSP_8540_CCSR_BASE         + 0x24000,
+		.phy_addr = 2,
 	},
 };
 
@@ -916,7 +938,7 @@ FEC_Enet_Base b = mp->base;
 	 */
 	if ( tsec_mtx )
 #endif
-	phy_dis_irq_at_phy( mp );
+	    phy_dis_irq_at_phy( mp );
 
 	mp->irq_mask_cache = 0;
 
@@ -1237,7 +1259,6 @@ if_t         		*ifp;
 	mp->irq_mask = irq_mask;
 
 	/* mark as used */
-	//ifp->if_init = (void*)(-1);
 	theTsecEths[unit-1].was_init = true;
 
 	return mp;
@@ -1262,16 +1283,16 @@ BSP_tsec_setup(
 		return 0;
 	}
 	return tsec_setup_internal(
-								unit,
-								driver_tid,
-								0, 0,
-								cleanup_txbuf, cleanup_txbuf_arg,
-								alloc_rxbuf,
-								consume_rxbuf, consume_rxbuf_arg,
-								rx_ring_size,
-								tx_ring_size,
-								irq_mask
-							   );
+		unit,
+		driver_tid,
+		0, 0,
+		cleanup_txbuf, cleanup_txbuf_arg,
+		alloc_rxbuf,
+		consume_rxbuf, consume_rxbuf_arg,
+		rx_ring_size,
+		tx_ring_size,
+		irq_mask
+	);
 }
 
 struct tsec_private *
@@ -1294,16 +1315,16 @@ BSP_tsec_setup_1(
 		return 0;
 	}
 	return tsec_setup_internal(
-								unit,
-								0,
-								isr, isr_arg,
-								cleanup_txbuf, cleanup_txbuf_arg,
-								alloc_rxbuf,
-								consume_rxbuf, consume_rxbuf_arg,
-								rx_ring_size,
-								tx_ring_size,
-								irq_mask
-							   );
+		unit,
+		0,
+		isr, isr_arg,
+		cleanup_txbuf, cleanup_txbuf_arg,
+		alloc_rxbuf,
+		consume_rxbuf, consume_rxbuf_arg,
+		rx_ring_size,
+		tx_ring_size,
+		irq_mask
+	);
 }
 
 void
@@ -1331,17 +1352,31 @@ mac_set_duplex(struct tsec_private *mp)
 {
 int media = IFM_MAKEWORD(0, 0, 0, 0);
 
-	if ( 0 == BSP_tsec_media_ioctl(mp, SIOCGIFMEDIA, &media)) {
-		if ( IFM_LINK_OK & media ) {
+    if (mp->sc && mp->sc->mii_softc) {
+        mii_pollstat(mp->sc->mii_softc);
+        const int mask = IFM_AVALID | IFM_ACTIVE;
+		if ( mask & IFM_OPTIONS(mp->sc->mii_softc->mii_media_status) ) {
 			/* update duplex setting in MACCFG2 */
-			if ( IFM_FDX & media ) {
+			if ( IFM_FDX & IFM_OPTIONS(mp->sc->mii_softc->mii_media_status) ) {
+				fec_set( mp->base, TSEC_MACCFG2, TSEC_MACCFG2_FD );
+			} else {
+				fec_clr( mp->base, TSEC_MACCFG2, TSEC_MACCFG2_FD );
+			}
+		}
+		return mp->sc->mii_softc->mii_media_status;
+	}
+    /* Fallback to old method if using driver with raw UDP stack */
+    else if (BSP_tsec_media_ioctl(mp, SIOCGIFMEDIA, &media) == 0) {
+		if ( media & IFM_LINK_OK ) {
+			/* update duplex setting in MACCFG2 */
+			if ( IFM_FDX & IFM_OPTIONS(media) ) {
 				fec_set( mp->base, TSEC_MACCFG2, TSEC_MACCFG2_FD );
 			} else {
 				fec_clr( mp->base, TSEC_MACCFG2, TSEC_MACCFG2_FD );
 			}
 		}
 		return media;
-	}
+    }
 	return -1;
 }
 
@@ -2167,9 +2202,9 @@ int rval;
 }
 
 static struct rtems_mdio_info tsec_mdio = {
-	mdio_r:	  tsec_mdio_rd,
-	mdio_w:	  tsec_mdio_wr,
-	has_gmii: 1,
+	.mdio_r =	  tsec_mdio_rd,
+	.mdio_w =	  tsec_mdio_wr,
+	.has_gmii = 1,
 };
 
 
@@ -2477,7 +2512,6 @@ STATIC void
 tsec_stop(struct tsec_softc *sc)
 {
 	BSP_tsec_stop_hw(&sc->pvt);
-	//sc->arpcom.ac_if.if_timer = 0;
 }
 
 /* allocate a mbuf for RX with a properly aligned data buffer
@@ -2530,8 +2564,8 @@ struct mbuf    *m = buf;
 		struct ether_header *eh;
 
 			eh			= (struct ether_header *)(mtod(m, unsigned long) + ETH_RX_OFFSET);
-			m->m_len	= m->m_pkthdr.len = len - sizeof(struct ether_header) - ETH_RX_OFFSET - ETH_CRC_LEN;
-			m->m_data  += sizeof(struct ether_header) + ETH_RX_OFFSET;
+			m->m_len	= m->m_pkthdr.len = len - ETH_RX_OFFSET - ETH_CRC_LEN;
+			m->m_data  += ETH_RX_OFFSET;
 			m->m_pkthdr.rcvif = ifp;
 
 			if_inc_counter(ifp, IFCOUNTER_IPACKETS, 1);
@@ -2556,7 +2590,6 @@ struct mbuf    *m = buf;
 			if (0) /* Low-level debugging/testing without bsd stack */
 				m_freem(m);
 			else
-				//ether_input(ifp, eh, m);
 				(*ifp->if_input)(ifp, m);
 
 	}
@@ -2576,30 +2609,93 @@ struct mbuf  *mb  = buf;
 	m_freem(mb);
 }
 
-/* BSDNET DRIVER CALLBACKS */
+/* LIBBSD DRIVER CALLBACKS */
 
+/**
+ * Callback from ifmedia_ioctl
+ */
+static int
+tsec_media_change(if_t ifp)
+{
+struct tsec_softc *sc   = if_getsoftc( ifp );
+
+#if DEBUG
+	printk(DRVNAME": tsec_media_change\n");
+#endif
+
+	if (!sc->mii_softc) {
+		return ENXIO;
+	}
+
+	return mii_mediachg(sc->mii_softc);
+}
+
+/**
+ * @brief Report the current PHY status to the MII subsystem.
+ * Callback from ifmedia_ioctl SIOCGIFXMEDIA/SIOCGIFMEDIA
+ */
+static void
+tsec_media_status(if_t ifp, struct ifmediareq *ifmr)
+{
+struct tsec_softc *sc   = if_getsoftc( ifp );
+
+#if DEBUG
+	printk(DRVNAME": tsec_media_status\n");
+#endif
+
+    uint32_t word = phy_get_speed(&sc->pvt);
+
+    /* update baudrate based on speed */
+    uint32_t speed = IFM_SUBTYPE(word);
+    if (speed == IFM_10_T)
+        if_setbaudrate(ifp, IF_Mbps(10));
+    else if (speed == IFM_100_T)
+        if_setbaudrate(ifp, IF_Mbps(100));
+    else if (speed == IFM_1000_T)
+        if_setbaudrate(ifp, IF_Mbps(1000));
+
+	if (sc->mii_softc) {
+		mii_pollstat(sc->mii_softc);
+		ifmr->ifm_active = sc->mii_softc->mii_media_active;
+		ifmr->ifm_status = sc->mii_softc->mii_media_status;
+	}
+}
+
+/**
+ * @brief Init tsec hardware
+ * @param arg Pointer to tsec_softc structure
+ */
 static void
 tsec_init(void* arg)
 {
-if_t ifp = arg;
-struct tsec_softc	*sc  = if_getsoftc(ifp);
+struct tsec_softc	*sc = arg;
+if_t                ifp = sc->ifp;
 int                 media;
-
-	BSP_tsec_init_hw(&sc->pvt, ifp->if_flags & IFF_PROMISC, sc->enetaddr);
+int                 promisc;
 
 	/* Determine initial link status and block sender if there is no link */
 	media = IFM_MAKEWORD(0, 0, 0, 0);
-	if ( 0 == BSP_tsec_media_ioctl(&sc->pvt, SIOCGIFMEDIA, &media) ) {
-		if ( (IFM_LINK_OK & media) ) {
-			ifp->if_flags &= ~IFF_DRV_OACTIVE;
+    if (sc->mii_softc) {
+        mii_pollstat(sc->mii_softc);
+
+        /* clear 'tx full' flag if the link is available or active */
+        if (sc->mii_softc->mii_media_status & (IFM_AVALID | IFM_ACTIVE)) {
+            if_setdrvflagbits(ifp, 0, IFF_DRV_OACTIVE);
 		} else {
-			ifp->if_flags |=  IFF_DRV_OACTIVE;
+            if_setdrvflagbits(ifp, IFF_DRV_OACTIVE, 0);
 		}
 	}
 
-	tsec_update_mcast(ifp);
-	ifp->if_flags |= IFF_DRV_RUNNING;
-	//sc->arpcom.ac_if.if_timer = 0;
+	promisc = !! (if_getdrvflags(ifp) & IFF_PROMISC);
+
+	BSP_tsec_init_hw(&sc->pvt, ifp->if_flags & IFF_PROMISC, sc->enetaddr);
+
+	/* if promiscuous then there is no need to change */
+	if (!promisc) {
+	    tsec_update_mcast(ifp);
+	}
+
+    if_setdrvflagbits(ifp, IFF_DRV_RUNNING, 0);
 }
 
 /* bsdnet driver entry to start transmission */
@@ -2613,35 +2709,17 @@ struct mbuf			*m  = 0;
 		IF_DEQUEUE( &ifp->if_snd, m );
 		if ( BSP_tsec_send_buf(&sc->pvt, m, 0, 0) < 0 ) {
 			IF_PREPEND( &ifp->if_snd, m);
-			ifp->if_flags |= IFF_DRV_OACTIVE;
+            if_setdrvflagbits(ifp, IFF_DRV_OACTIVE, 0);
 			break;
 		}
-		/* need to do this really only once
-		 * but it's cheaper this way.
-		 */
-		//ifp->if_timer = 2*IFNET_SLOWHZ;
 	}
 }
 
-/* bsdnet driver entry; */
-static void
-tsec_watchdog(if_t ifp)
-{
-struct tsec_softc	*sc = if_getsoftc(ifp);
-
-	if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
-	printk(DRVNAME"%i: watchdog timeout; resetting\n", sc->unit);
-
-	tsec_init(ifp);
-	tsec_start(ifp);
-}
-
 static u_int
-tsec_set_filter_for(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+tsec_set_filter_for_each(void *arg, struct sockaddr_dl *sdl, u_int cnt)
 {
 	struct tsec_softc* sc = arg;
 	BSP_tsec_mcast_filter_accept_add(&sc->pvt, LLADDR(sdl));
-	//BSP_mve_mcast_filter_accept_add(sc->mp, LLADDR(sdl));
 	return 1;
 }
 
@@ -2650,44 +2728,31 @@ tsec_update_mcast(struct ifnet *ifp)
 {
 struct tsec_softc *sc = ifp->if_softc;
 struct ether_multi     *enm;
-//struct ether_multistep step;
 
 	if ( IFF_ALLMULTI & ifp->if_flags ) {
 		BSP_tsec_mcast_filter_accept_all( &sc->pvt );
 	} else {
 		BSP_tsec_mcast_filter_clear( &sc->pvt );
 
-		if_foreach_llmaddr(ifp, tsec_set_filter_for, sc);
-		//ETHER_FIRST_MULTI(step, (struct arpcom *)ifp, enm);
-
-		//while ( enm ) {
-		//	if ( memcmp(enm->enm_addrlo, enm->enm_addrhi, ETHER_ADDR_LEN) )
-		//		assert( !"Should never get here; IFF_ALLMULTI should be set!" );
-
-		//	BSP_tsec_mcast_filter_accept_add(&sc->pvt, enm->enm_addrlo);
-
-		//	ETHER_NEXT_MULTI(step, enm);
-		//}
+		if_foreach_llmaddr(ifp, tsec_set_filter_for_each, sc);
 	}
 }
 
 /* bsdnet driver ioctl entry */
 static int
-tsec_ioctl(struct ifnet *ifp, ioctl_command_t cmd, caddr_t data)
+tsec_ioctl(if_t ifp, ioctl_command_t cmd, caddr_t data)
 {
-struct tsec_softc	*sc   = ifp->if_softc;
+struct tsec_softc	*sc   = if_getsoftc(ifp);
 struct ifreq		*ifr  = (struct ifreq *)data;
-#if 0
-uint32_t			v;
-#endif
 int					error = 0;
-int					f;
+int					f, df;
 
 	switch ( cmd ) {
   		case SIOCSIFFLAGS:
-			f = ifp->if_flags;
+			f = if_getflags(ifp);
+            df = if_getdrvflags(ifp);
 			if ( f & IFF_UP ) {
-				if ( ! ( f & IFF_DRV_RUNNING ) ) {
+				if ( ! ( df & IFF_DRV_RUNNING ) ) {
 					tsec_init(sc);
 				} else {
 					if ( (f & IFF_PROMISC) != (sc->bsd.oif_flags & IFF_PROMISC) ) {
@@ -2705,36 +2770,33 @@ int					f;
 					/* FIXME: other flag changes are ignored/unimplemented */
 				}
 			} else {
-				if ( f & IFF_DRV_RUNNING ) {
+				if ( df & IFF_DRV_RUNNING ) {
 					tsec_stop(sc);
-					ifp->if_flags  &= ~(IFF_DRV_RUNNING | IFF_DRV_OACTIVE);
+                    if_setdrvflagbits(ifp, 0, IFF_DRV_RUNNING | IFF_DRV_OACTIVE);
 				}
 			}
-			sc->bsd.oif_flags = ifp->if_flags;
+			sc->bsd.oif_flags = f;
 		break;
 
   		case SIOCGIFMEDIA:
   		case SIOCSIFMEDIA:
-			error = BSP_tsec_media_ioctl(&sc->pvt, cmd, &ifr->ifr_media);
+			if (sc->mii_softc) {
+				error = ifmedia_ioctl(ifp, ifr, &sc->mii_softc->mii_media, cmd);
+			} else {
+				error = EINVAL;
+			}
 		break;
 
  		case SIOCADDMULTI:
  		case SIOCDELMULTI:
-			//error = (cmd == SIOCADDMULTI)
-		    //		? ether_addmulti(ifr, &sc->arpcom)
-			//	    : ether_delmulti(ifr, &sc->arpcom);
-
-			if (error == ENETRESET) {
-				if (ifp->if_flags & IFF_DRV_RUNNING) {
-					tsec_update_mcast(ifp);
-				}
-				error = 0;
+    		if (if_getdrvflags(ifp) & IFF_DRV_RUNNING) {
+				tsec_update_mcast(ifp);
 			}
 		break;
 
- 		//case SIO_RTEMS_SHOW_STATS:
-		//	BSP_tsec_dump_stats( &sc->pvt, stdout );
-		//break;
+ 		case SIO_RTEMS_SHOW_STATS:
+			BSP_tsec_dump_stats( &sc->pvt, stdout );
+		break;
 
 		default:
 			error = ether_ioctl(ifp, cmd, data);
@@ -2758,17 +2820,17 @@ rtems_event_set		evs;
 		for ( sc = theTsecEths; evs; evs>>=EV_PER_UNIT, sc++ ) {
 			if ( EV_IS_ANY(evs) ) {
 
-				register uint32_t x;
+				uint32_t x;
 
 				ifp = sc->ifp;
 
 				if ( !(ifp->if_flags & IFF_UP) ) {
 					tsec_stop(sc);
-					ifp->if_flags &= ~(IFF_UP|IFF_DRV_RUNNING);
+                    if_setdrvflagbits(ifp, 0, IFF_DRV_RUNNING | IFF_DRV_OACTIVE);
 					continue;
 				}
 
-				if ( !(ifp->if_flags & IFF_DRV_RUNNING) ) {
+				if ( !(if_getdrvflags(ifp) & IFF_DRV_RUNNING) ) {
 					/* event could have been pending at the time hw was stopped;
 					 * just ignore...
 					 */
@@ -2781,29 +2843,30 @@ rtems_event_set		evs;
 					/* phy status changed */
 					int media;
 
+                    if (sc->mii_softc)
+                        mii_pollstat(sc->mii_softc);
+
 #ifdef DEBUG
 					printf("LINK INTR\n");
 #endif
 					if ( -1 != (media = mac_set_duplex( &sc->pvt )) ) {
 #ifdef DEBUG
-						rtems_ifmedia2str( media, 0, 0 );
-						printf("\n");
+						//rtems_ifmedia2str( media, 0, 0 );
+						//printf("\n");
 #endif
-						if ( IFM_LINK_OK & media ) {
-							ifp->if_flags &= ~IFF_DRV_OACTIVE;
+						if ( (IFM_LINK_OK | IFM_ACTIVE | IFM_AVALID) & media ) {
+                            if_setdrvflagbits(ifp, 0, IFF_DRV_OACTIVE);
 							tsec_start(ifp);
 						} else {
 							/* stop sending */
-							ifp->if_flags |= IFF_DRV_OACTIVE;
+                            if_setdrvflagbits(ifp, IFF_DRV_OACTIVE, 0);
 						}
 					}
 				}
 
 				/* free tx chain */
 				if ( (TSEC_TXIRQ & x) && BSP_tsec_swipe_tx(&sc->pvt) ) {
-					ifp->if_flags &= ~IFF_DRV_OACTIVE;
-					//if ( TX_AVAILABLE_RING_SIZE(&sc->pvt) == sc->pvt.tx_avail )
-					//	ifp->if_timer = 0;
+                    if_setdrvflagbits(ifp, 0, IFF_DRV_OACTIVE);
 					tsec_start(ifp);
 				}
 				if ( (TSEC_RXIRQ & x) )
@@ -2815,179 +2878,246 @@ rtems_event_set		evs;
 	}
 }
 
-/* PUBLIC RTEMS BSDNET ATTACH FUNCTION */
-int
-//rtems_tsec_attach(struct rtems_bsdnet_ifconfig *ifcfg, int attaching)
-legacy_tsec_attach(device_t dev)
+/**
+ * Probe
+ * DEVMETHOD()
+ */
+static int
+legacy_tsec_probe(device_t dev)
+{
+	const int unit = device_get_unit(dev);
+	if (unit >= 0 && unit < TSEC_NUM_DRIVER_SLOTS)
+		return BUS_PROBE_DEFAULT;
+	return ENXIO;
+}
 
+/**
+ * Attach to the device.
+ * DEVMETHOD()
+ */
+int
+legacy_tsec_attach(device_t dev)
 {
 char				*unitName;
-int					unit,i,cfgUnits;
+int					unit,i,cfgUnits,r;
 struct	tsec_softc *sc;
 struct	ifnet		*ifp;
 rtems_status_code 	status;
 uint8_t				hwaddr[ETHER_ADDR_LEN];
+struct tsec_private* mp;
 
-	//unit = rtems_bsdnet_parse_driver_name(ifcfg, &unitName);
-	unit = device_get_unit(dev);
+	/* the rest of this driver assumes unit is 1-based */
+	unit = device_get_unit(dev) + 1;
+
 	if ( unit <= 0 || unit > TSEC_NUM_DRIVER_SLOTS ) {
-		printk(DRVNAME": Bad unit number %i; must be 1..%i\n", unit, TSEC_NUM_DRIVER_SLOTS);
+		device_printf(dev, DRVNAME": Bad unit number %i; must be 1..%i\n", unit, TSEC_NUM_DRIVER_SLOTS);
 		return 1;
 	}
 
-	sc         = &theTsecEths[unit-1];
-	//ifp        = &sc->arpcom.ac_if;
-	// TODO: ifp??????
+	sc  = &theTsecEths[unit-1];
+	if ( sc->was_init ) {
+		device_printf(dev, DRVNAME": instance %i already attached.\n", unit);
+		return -1;
+	}
+
+	ifp = if_alloc(IFT_ETHER);
+
+	/* setup softc */
+	sc->ifp = ifp;
+	sc->unit = unit;
+	sc->dev = dev;
 
 	device_set_softc(dev, sc);
 
-	if (1) {
-		sc->ifp = ifp;
-
-		if ( ifp->if_init ) {
-			printk(DRVNAME": instance %i already attached.\n", unit);
-			return -1;
-		}
-
-		for ( i=cfgUnits = 0; i<TSEC_NUM_DRIVER_SLOTS; i++ ) {
-			if ( theTsecEths[i].was_init )
-				cfgUnits++;
-		}
-		cfgUnits++; /* this new one */
-
-		/* lazy init of TID should still be thread-safe because we are protected
-		 * by the global networking semaphore..
-		 */
-		if ( !tsec_tid ) {
-			/* newproc uses the 1st 4 chars of name string to build an rtems name */
-			//tsec_tid = rtems_bsdnet_newproc("FECd", 4096, tsec_daemon, 0);
-			status = rtems_task_create(
-				rtems_build_name('T', 'S', 'E', 'C'),
-				0,
-				4096,
-				RTEMS_PREEMPT | RTEMS_NO_TIMESLICE | RTEMS_NO_ASR 
-				| RTEMS_INTERRUPT_LEVEL(0),
-				RTEMS_NO_FLOATING_POINT | RTEMS_LOCAL,
-				&tsec_tid
-			);
-			
-			if (status != RTEMS_SUCCESSFUL) {
-				rtems_panic(
-					"rtems_tsec_attach: Cannot create tsec daemon: %s\n",
-					rtems_status_text(status)
-				);
-			}
-			
-			rtems_task_start(tsec_tid, tsec_daemon, 0);
-		}
-
-		if ( !BSP_tsec_setup( unit,
-						     tsec_tid,
-						     release_tx_mbuf,
-							 ifp,
-						     alloc_mbuf_rx,
-						     consume_rx_mbuf,
-							 ifp,
-							 TSEC_RX_RING_SIZE,
-							 TSEC_TX_RING_SIZE,
-			                 TSEC_RXIRQ | TSEC_TXIRQ | TSEC_LINK_INTR) ) {
-			return -1;
-		}
-
-		if ( nmbclusters < sc->pvt.rx_ring_size * cfgUnits + 60 /* arbitrary */ )  {
-			printk(DRVNAME"%i: (tsec ethernet) Your application has not enough mbuf clusters\n", unit);
-			printk(     "                      configured for this driver.\n");
-			return -1;
-		}
-
-		/* read back from hardware assuming that MotLoad already had set it up */
-		BSP_tsec_read_eaddr(&sc->pvt, hwaddr);
-		memcpy(sc->enetaddr, hwaddr, sizeof(sc->enetaddr));
-
-		//ifp->if_softc			= sc;
-		if_setsoftc(ifp, sc);
-		//ifp->if_unit			= unit;
-		//ifp->if_name			= unitName;
-		if_setname(ifp, unitName);
-
-		//ifp->if_mtu				= ifcfg->mtu ? ifcfg->mtu : ETHERMTU;
-		//if_setmtu(ifp, ifcfg->mtu ? ifcfg->mtu : ETHERMTU);
-
-		//ifp->if_init			= tsec_init;
-		if_setinitfn(ifp, tsec_init);
-		//ifp->if_ioctl			= tsec_ioctl;
-		if_setioctlfn(ifp, tsec_ioctl);
-		//ifp->if_start			= tsec_start;
-		if_setstartfn(ifp, tsec_start);
-		//ifp->if_output			= ether_output;
-		if_setoutputfn(ifp, ether_output);
-
-		if_setsendqlen(ifp, TSEC_TX_RING_SIZE);
-		if_setsendqready(ifp);
-
-		/*
-		 * While nonzero, the 'if->if_timer' is decremented
-		 * (by the networking code) at a rate of IFNET_SLOWHZ (1hz) and 'if_watchdog'
-		 * is called when it expires.
-		 * If either of those fields is 0 the feature is disabled.
-		 */
-		//ifp->if_watchdog		= tsec_watchdog;
-		//ifp->if_timer			= 0;
-
-		sc->bsd.oif_flags		= /* ... */
-		//ifp->if_flags			= IFF_BROADCAST | IFF_MULTICAST | IFF_SIMPLEX;
-		if_setflags(ifp, IFF_BROADCAST | IFF_MULTICAST | IFF_SIMPLEX);
-
-		/*
-		 * if unset, this set to 10Mbps by ether_ifattach; seems to be unused by bsdnet stack;
-		 * could be updated along with phy speed, though...
-		ifp->if_baudrate		= 10000000;
-		*/
-
-		/* NOTE: ether_output drops packets if ifq_len >= ifq_maxlen
-		 *       but this is the packet count, not the fragment count!
-		ifp->if_snd.ifq_maxlen	= sc->pvt.tx_ring_size;
-		*/
-		ifp->if_snd.ifq_maxlen	= ifqmaxlen;
-
-#ifdef  TSEC_DETACH_HACK
-		if ( !ifp->if_addrlist ) /* do only the first time [reattach hack] */
-#endif
-		{
-			if_attach(ifp);
-			ether_ifattach(ifp, hwaddr);
-		}
-
-	} 
-#if 0
-	else {
-#ifdef  TSEC_DETACH_HACK
-		if ( !ifp->if_init ) {
-			printk(DRVNAME": instance %i not attached.\n", unit);
-			return -1;
-		}
-		return tsec_detach(sc);
-#else
-		printk(DRVNAME": interface detaching not implemented\n");
-		return -1;
-#endif
+	for ( i=cfgUnits = 0; i<TSEC_NUM_DRIVER_SLOTS; i++ ) {
+		if ( theTsecEths[i].was_init )
+			cfgUnits++;
 	}
-#endif
+	cfgUnits++; /* this new one */
+
+    
+    /* setup if_t */
+	if_setsoftc(ifp, sc);
+    if_initname(ifp, DRVNAME, unit);
+
+	if_setinitfn(ifp, tsec_init);
+	if_setioctlfn(ifp, tsec_ioctl);
+	if_setstartfn(ifp, tsec_start);
+
+	if_setflags(ifp, IFF_BROADCAST | IFF_MULTICAST | IFF_SIMPLEX);
+
+	/* NOTE: ether_output drops packets if ifq_len >= ifq_maxlen
+	 *       but this is the packet count, not the fragment count!
+	ifp->if_snd.ifq_maxlen	= sc->pvt.tx_ring_size;
+	*/
+	if_setsendqlen(ifp, ifqmaxlen);
+	if_setsendqready(ifp);
+
+	sc->bsd.oif_flags		= if_getflags(ifp); /* ... */
+
+	/*
+	 * if unset, this set to 10Mbps by ether_ifattach; seems to be unused by bsdnet stack;
+	 * could be updated along with phy speed, though...
+	ifp->if_baudrate		= 10000000;
+	*/
+	
+	/* lazy init of TID should still be thread-safe because we are protected
+	 * by the global networking semaphore..
+	 */
+	if ( !tsec_tid ) {
+		/* newproc uses the 1st 4 chars of name string to build an rtems name */
+		tsec_tid = rtems_bsdnet_newproc("TSEC", 4096, tsec_daemon, 0);
+	}
+
+	mp = BSP_tsec_setup(
+		unit,
+		tsec_tid,
+		release_tx_mbuf,
+		ifp,
+		alloc_mbuf_rx,
+		consume_rx_mbuf,
+		ifp,
+		TSEC_RX_RING_SIZE,
+		TSEC_TX_RING_SIZE,
+		TSEC_RXIRQ | TSEC_TXIRQ | TSEC_LINK_INTR
+	);
+
+	if ( !mp ) {
+		device_printf(dev, "BSP_tsec_setup failed\n");
+        if_free(ifp);
+        sc->ifp = NULL;
+		return -1;
+	}
+
+	if ( nmbclusters < sc->pvt.rx_ring_size * cfgUnits + 60 /* arbitrary */ )  {
+		device_printf(dev, DRVNAME"%i: (tsec ethernet) Your application has not enough mbuf clusters\n", unit);
+		device_printf(dev,     "                      configured for this driver.\n");
+        if_free(ifp);
+        sc->ifp = NULL;
+        return -1;
+	}
+
+	r = mii_attach(
+        sc->dev,
+        &sc->miibus,
+        ifp,
+        tsec_media_change,
+        tsec_media_status,
+        BMSR_DEFCAPMASK,
+        0, /* only supported PHY */
+        MII_OFFSET_ANY,
+	    0
+	);
+
+	if ( r == 0 ) {
+		sc->mii_softc = device_get_softc( sc->miibus );
+	}
+
+    /* Read back ethernet addr */
+	BSP_tsec_read_eaddr(&sc->pvt, hwaddr);
+	memcpy(sc->enetaddr, hwaddr, sizeof(sc->enetaddr));
+
+	ether_ifattach(ifp, hwaddr);
 
 	return 0;
 }
 
+/**
+ * Detatch the driver
+ * DEVMETHOD()
+ */
 static int
 legacy_tsec_detach(device_t device)
 {
 	struct tsec_softc* sc = device_get_softc(device);
-	return rtems_tsec_detach(device);
+	return rtems_tsec_detach(sc);
+}
+
+/**
+ * Write a MII register on the PHY
+ * DEVMETHOD()
+ */
+static int
+legacy_tsec_miibus_writereg(device_t dev, int phy, int reg, int val)
+{
+	struct tsec_softc* sc = device_get_softc(dev);
+	/* NOTE: phy argument is ignored because we only 
+	 * support one PHY currently... */
+	(void)phy;
+	return BSP_tsec_mdio_wr(&sc->pvt, reg, val);
+}
+
+/**
+ * Read a MII register on the PHY
+ * DEVMETHOD()
+ */
+static int
+legacy_tsec_miibus_readreg(device_t dev, int phy, int reg)
+{
+	struct tsec_softc* sc = device_get_softc(dev);
+	/* NOTE: phy argument is ignored because we only 
+	 * support one PHY currently... */
+	(void)phy;
+	return (int)BSP_tsec_mdio_rd(&sc->pvt, reg);
+}
+
+/**
+ * Update the media word on the PHY, and reset the device.
+ */
+static int
+legacy_tsec_miibus_update_media_word(struct tsec_softc* sc)
+{
+    if (!sc->mii_softc)
+        return 0;
+
+    /* Skip update if link isn't active */
+    if (!(sc->mii_softc->mii_media_status & (IFM_ACTIVE | IFM_AVALID)))
+        return 0;
+
+    /* update media settings and reset */
+    phy_set_media(&sc->pvt, sc->mii_softc->mii_media_active);
+    rtems_event_send(sc->pvt.tid, sc->pvt.event);
+    //if_setdrvflagbits(sc->ifp, 0, IFF_DRV_OACTIVE);
+    //tsec_start(sc->ifp);
+
+    return 0;
+}
+
+/**
+ * MII status change. Called by MII driver when the PHY establishes a link.
+ * Updates the MAC interface registers on hardware.
+ * DEVMETHOD()
+ */
+static int
+legacy_tsec_miibus_statchg(device_t dev)
+{
+    struct tsec_softc* sc = device_get_softc(dev);
+    return legacy_tsec_miibus_update_media_word(sc);
+}
+
+/**
+ * MII link status change. Update media options on the PHY.
+ * DEVMETHOD()
+ */
+static int
+legacy_tsec_miibus_linkchg(device_t dev)
+{
+    struct tsec_softc* sc = device_get_softc(dev);
+    return legacy_tsec_miibus_update_media_word(sc);
 }
 
 static device_method_t legacy_tsec_methods[] = {
+	/* Common device methods */
+	DEVMETHOD(device_probe,  legacy_tsec_probe),
 	DEVMETHOD(device_attach, legacy_tsec_attach),
 	DEVMETHOD(device_detach, legacy_tsec_detach),
 	
+	/* MII methods */
+	DEVMETHOD(miibus_readreg,  legacy_tsec_miibus_readreg ),
+	DEVMETHOD(miibus_writereg, legacy_tsec_miibus_writereg),
+	DEVMETHOD(miibus_statchg,  legacy_tsec_miibus_statchg  ),
+	DEVMETHOD(miibus_linkchg,  legacy_tsec_miibus_linkchg  ),
+
 	DEVMETHOD_END
 };
 
@@ -3040,18 +3170,6 @@ MODULE_DEPEND(legacy_tsec, ether, 1, 1, 1);
 
 #define BCM54xx_AUXST	0x19		/* AUX status         */
 #define BCM54xx_AUXST_LNKMM	(7<<8)	/* link mode mask     */
-
-/* link mode (linux' syngem_phy.c helped here...)
- *
- *  0: no link
- *  1: 10BT    half
- *  2: 10BT    full
- *  3: 100BT   half
- *  4: 100BT   half
- *  5: 100BT   full
- *  6: 1000BT  full
- *  7: 1000BT  full
- */
 
 #define BCM54xx_ISR		0x1a		/* IRQ status         */
 #define BCM54xx_IMR		0x1b		/* IRQ mask           */
@@ -3126,6 +3244,78 @@ rtems_irq_connect_data xxx;
 			BSP_remove_rtems_irq_handler( &xxx )) ) {
 		rtems_panic( "Unable to %s shared irq handler (PHY)\n", install ? "install" : "remove" );
 	}
+}
+
+/* link mode (linux' syngem_phy.c helped here...)
+ *
+ *  0: no link
+ *  1: 10BT    half
+ *  2: 10BT    full
+ *  3: 100BT   half
+ *  4: 100BT   half
+ *  5: 100BT   full
+ *  6: 1000BT  full
+ *  7: 1000BT  full
+ */
+
+static uint32_t
+phy_get_speed(struct tsec_private* mp)
+{
+    uint32_t val;
+    REGLOCK();
+    tsec_mdio_rd(0, mp, BCM54xx_AUXST, &val);
+    REGUNLOCK();
+
+    uint32_t ret = 0;
+    switch ((val & BCM54xx_AUXST_LNKMM) >> 8)
+    {
+    case 0:
+    case 1: ret = IFM_ETHER_SUBTYPE_SET(ret); ret |= IFM_HDX; break;
+    case 2: ret = IFM_ETHER_SUBTYPE_SET(ret); ret |= IFM_FDX; break;
+    case 3: ret = IFM_ETHER_SUBTYPE_SET(ret); ret |= IFM_HDX; break;
+    case 4: ret = IFM_ETHER_SUBTYPE_SET(ret); ret |= IFM_HDX; break;
+    case 5: ret = IFM_ETHER_SUBTYPE_SET(ret); ret |= IFM_FDX; break;
+    case 6: ret = IFM_ETHER_SUBTYPE_SET(ret); ret |= IFM_FDX; break;
+    case 7: ret = IFM_ETHER_SUBTYPE_SET(ret); ret |= IFM_FDX; break;
+    }
+    return ret;
+}
+
+/**
+ * Set the media word on the phy. Mostly setting link speed.
+ */
+static void
+phy_set_media(struct tsec_private* mp, uint32_t media)
+{
+    int type = 0;
+    switch (IFM_SUBTYPE(media)) {
+    case IFM_10_T:
+        if (IFM_OPTIONS(media) & IFM_FDX)
+            type = 2;
+        else if (IFM_OPTIONS(media) & IFM_HDX)
+            type = 1;
+        break;
+    case IFM_100_T:
+        if (IFM_OPTIONS(media) & IFM_FDX)
+            type = 5;
+        else if (IFM_OPTIONS(media) & IFM_FDX)
+            type = 4;
+        break;
+    case IFM_1000_T:
+        if (IFM_OPTIONS(media) & IFM_FDX)
+            type = 7;
+        else if (IFM_OPTIONS(media) & IFM_HDX)
+            type = 6;
+        break;
+    }
+    
+    REGLOCK();
+    uint32_t nv = 0;
+    tsec_mdio_rd(0, mp, BCM54xx_AUXST, &nv);
+    nv &= ~BCM54xx_AUXST_LNKMM;
+    nv |= (type << 8) & BCM54xx_AUXST_LNKMM;
+    tsec_mdio_wr(0, mp, BCM54xx_AUXST, nv);
+    REGUNLOCK();
 }
 
 /* Because on the MVME3100 multiple PHYs (belonging to different
