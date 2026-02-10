@@ -3064,15 +3064,15 @@ legacy_tsec_miibus_readreg(device_t dev, int phy, int reg)
 /**
  * Update the media word on the PHY, and reset the device.
  */
-static int
+static void
 legacy_tsec_miibus_update_media_word(struct tsec_softc* sc)
 {
     if (!sc->mii_softc)
-        return 0;
+        return;
 
     /* Skip update if link isn't active */
     if (!(sc->mii_softc->mii_media_status & (IFM_ACTIVE | IFM_AVALID)))
-        return 0;
+        return;
 
     /* update media settings and reset */
     phy_set_media(&sc->pvt, sc->mii_softc->mii_media_active);
@@ -3080,7 +3080,7 @@ legacy_tsec_miibus_update_media_word(struct tsec_softc* sc)
     //if_setdrvflagbits(sc->ifp, 0, IFF_DRV_OACTIVE);
     //tsec_start(sc->ifp);
 
-    return 0;
+    return;
 }
 
 /**
@@ -3088,22 +3088,22 @@ legacy_tsec_miibus_update_media_word(struct tsec_softc* sc)
  * Updates the MAC interface registers on hardware.
  * DEVMETHOD()
  */
-static int
+static void
 legacy_tsec_miibus_statchg(device_t dev)
 {
     struct tsec_softc* sc = device_get_softc(dev);
-    return legacy_tsec_miibus_update_media_word(sc);
+    legacy_tsec_miibus_update_media_word(sc);
 }
 
 /**
  * MII link status change. Update media options on the PHY.
  * DEVMETHOD()
  */
-static int
+static void
 legacy_tsec_miibus_linkchg(device_t dev)
 {
     struct tsec_softc* sc = device_get_softc(dev);
-    return legacy_tsec_miibus_update_media_word(sc);
+    legacy_tsec_miibus_update_media_word(sc);
 }
 
 static device_method_t legacy_tsec_methods[] = {
